@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14171a">
+<title>트랙터 모니터</title>
+<style>
+  :root {
+    --bg: #f4f5f2; --card: #ffffff; --text: #1b1f1d; --muted: #6b726e; --line: #e2e5e0;
+    --accent: #2f7d4f; --warn: #c2410c; --warn-bg: #fff1e8; --danger: #b91c1c; --danger-bg: #fdecec;
+    --bar: #d7e5db;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171a; --card: #1d2125; --text: #e8ece9; --muted: #8f9893; --line: #2c3237;
+      --accent: #5cc285; --warn: #fb923c; --warn-bg: #3a2416; --danger: #f87171; --danger-bg: #3b1a1a;
+      --bar: #2a3b31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--accent); }
+  .dot.stale { background: var(--warn); }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 10px; padding: 8px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; }
+  main { padding: 12px 16px 32px; max-width: 900px; margin: 0 auto; }
+  .lamps { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .lamp { padding: 4px 10px; border-radius: 999px; font-size: 13px; border: 1px solid var(--line); color: var(--muted); }
+  .lamp.on.amber { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); font-weight: 600; }
+  .lamp.on.red { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+  .card .label { font-size: 13px; color: var(--muted); }
+  .card .val { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .card .unit { font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 400; }
+  .card .bar { height: 5px; background: var(--bar); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .card .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .card.warn { border-color: var(--warn); background: var(--warn-bg); }
+  .card.warn .val { color: var(--warn); }
+  .card.warn .bar i { background: var(--warn); }
+  .card.na .val { color: var(--muted); }
+  h2 { font-size: 15px; margin: 22px 0 8px; }
+  .dtc { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 6px; }
+  .dtc b { color: var(--danger); }
+  .dtc small { color: var(--muted); display: block; }
+  .empty { color: var(--muted); font-size: 14px; }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .quick button { font-size: 13px; padding: 6px 10px; }
+  #log { background: var(--card); border: 1px solid var(--line); border-radius: 12px; height: 220px; overflow: auto;
+    padding: 8px 10px; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  #log .tx { color: var(--accent); }
+  #log .err { color: var(--danger); }
+  form { display: flex; gap: 6px; margin-top: 8px; }
+  form input { flex: 1; min-width: 0; font: 14px ui-monospace, Consolas, monospace; padding: 8px 10px;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>트랙터 모니터</h1>
+  <button class="primary" id="btnConnect">연결</button>
+</header>
+
+<main>
+  <div class="lamps">
+    <span class="lamp red" id="lamp-mil">MIL 엔진경고</span>
+    <span class="lamp red" id="lamp-rsl">정지 경고</span>
+    <span class="lamp amber" id="lamp-awl">주의</span>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <h2>고장 코드 (DM1)</h2>
+  <div id="dtcs"><div class="empty">고장 코드 없음</div></div>
+
+  <h2>콘솔</h2>
+  <div class="quick">
+    <button data-cmd="STATUS">상태</button>
+    <button data-cmd="REQ FEE5">엔진시간 요청</button>
+    <button data-cmd="RAW ALL">RAW 전체</button>
+    <button data-cmd="RAW OFF">RAW 끄기</button>
+    <button data-cmd="MODE LISTEN">수신전용 모드</button>
+    <button data-cmd="MODE NORMAL" data-confirm="송신 모드로 전환하면 트랙터 CAN 버스에 데이터를 보낼 수 있습니다. 정차 상태에서만 사용하세요. 계속할까요?">송신 모드</button>
+    <button id="btnClear">로그 지우기</button>
+  </div>
+  <div id="log"></div>
+  <form id="cmdForm">
+    <input id="cmdInput" placeholder="명령 입력 (예: RAW FEEE)" autocomplete="off" autocapitalize="characters">
+    <button type="submit">보내기</button>
+  </form>
+  <div class="meta" id="meta">연결되지 않음</div>
+</main>
+
+<script>
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // 폰 → ESP32
+const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP32 → 폰
+
+const METRICS = [
+  { k: 'rpm',   label: '엔진 회전수',  unit: 'rpm',  dec: 0, max: 3000, warn: v => v > 2700 },
+  { k: 'spd',   label: '주행 속도',    unit: 'km/h', dec: 1, max: 40, alt: 'wspd' },
+  { k: 'cool',  label: '냉각수 온도',  unit: '°C',   dec: 0, max: 120, warn: v => v >= 105 },
+  { k: 'load',  label: '엔진 부하',    unit: '%',    dec: 0, max: 100, warn: v => v >= 95 },
+  { k: 'fuelL', label: '연료 잔량',    unit: '%',    dec: 0, max: 100, warn: v => v <= 15 },
+  { k: 'fuelR', label: '연료 소모',    unit: 'L/h',  dec: 1, max: 40 },
+  { k: 'oilP',  label: '오일 압력',    unit: 'kPa',  dec: 0, max: 600, warn: (v, d) => d.rpm > 600 && v < 100 },
+  { k: 'oilT',  label: '오일 온도',    unit: '°C',   dec: 0, max: 150, warn: v => v >= 125 },
+  { k: 'batt',  label: '배터리',       unit: 'V',    dec: 1, max: 16, warn: v => v < 11.8 || v > 15 },
+  { k: 'pto',   label: '후방 PTO',     unit: 'rpm',  dec: 0, max: 1100 },
+  { k: 'hitch', label: '후방 히치',    unit: '%',    dec: 0, max: 100 },
+  { k: 'hrs',   label: '엔진 가동시간', unit: 'h',   dec: 1 },
+];
+
+const SPN_NAMES = {
+  84: '차량 속도', 91: '가속 페달', 92: '엔진 부하', 94: '연료 공급 압력', 96: '연료 잔량',
+  97: '연료 내 수분', 100: '엔진 오일 압력', 102: '부스트 압력', 105: '흡기 온도', 108: '대기압',
+  110: '냉각수 온도', 111: '냉각수 수위', 157: '연료 레일 압력', 158: '키 스위치 전압',
+  168: '배터리 전압', 174: '연료 온도', 175: '엔진 오일 온도', 190: '엔진 회전수',
+  636: '캠 위치 센서', 723: '크랭크 위치 센서', 1761: 'DEF(요소수) 잔량', 3251: 'DPF 차압',
+  3719: 'DPF 매연 적재량',
+};
+const FMI_NAMES = {
+  0: '값 높음(심각)', 1: '값 낮음(심각)', 2: '데이터 불규칙', 3: '전압 높음/단락(+)',
+  4: '전압 낮음/단락(-)', 5: '전류 낮음/단선', 6: '전류 높음/접지 단락', 7: '기계적 응답 이상',
+  8: '주파수/주기 이상', 9: '갱신 속도 이상', 10: '변화율 이상', 11: '원인 미상', 12: '장치 불량',
+  13: '보정 필요', 14: '특수 지시', 15: '값 높음(경미)', 16: '값 높음(보통)', 17: '값 낮음(경미)',
+  18: '값 낮음(보통)', 19: '네트워크 데이터 오류', 31: '조건 존재',
+};
+
+const $ = id => document.getElementById(id);
+const grid = $('grid'), logEl = $('log');
+let device = null, rxChar = null, lineBuf = '', lastData = 0, writeChain = Promise.resolve();
+
+// ----- 카드 생성 -----
+for (const m of METRICS) {
+  const el = document.createElement('div');
+  el.className = 'card na';
+  el.id = 'c-' + m.k;
+  el.innerHTML = `<div class="label">${m.label}</div><div class="val"><span>--</span><span class="unit">${m.unit}</span></div>` +
+    (m.max ? '<div class="bar"><i></i></div>' : '');
+  grid.appendChild(el);
+}
+
+// ----- 로그 -----
+function log(text, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = text;
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
+  logEl.appendChild(line);
+  while (logEl.childNodes.length > 400) logEl.removeChild(logEl.firstChild);
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ----- BLE -----
+async function connect() {
+  if (!navigator.bluetooth) {
+    alert('이 브라우저는 Web Bluetooth를 지원하지 않습니다.\nAndroid: Chrome, iPhone: Bluefy 앱을 사용하세요.');
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'Tractor' }],
+      optionalServices: [NUS_SERVICE],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    log('연결 중: ' + device.name);
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS_SERVICE);
+    rxChar = await svc.getCharacteristic(NUS_RX);
+    const tx = await svc.getCharacteristic(NUS_TX);
+    tx.addEventListener('characteristicvaluechanged', e => onChunk(new TextDecoder().decode(e.target.value)));
+    await tx.startNotifications();
+    setConnected(true);
+    log('연결됨');
+    send('STATUS');
+  } catch (e) {
+    log('연결 실패: ' + e.message, 'err');
+    setConnected(false);
+  }
+}
+
+function disconnect() {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+
+function onDisconnected() {
+  rxChar = null;
+  setConnected(false);
+  log('연결 끊김', 'err');
+}
+
+function setConnected(on) {
+  $('btnConnect').textContent = on ? '연결 해제' : '연결';
+  $('btnConnect').classList.toggle('primary', !on);
+  $('dot').className = 'dot' + (on ? ' on' : '');
+  $('meta').textContent = on ? (device.name + ' 연결됨') : '연결되지 않음';
+}
+
+// GATT 쓰기는 동시에 하나만 가능 → 순서대로 직렬화
+function send(cmd) {
+  if (!rxChar) { log('연결되지 않음', 'err'); return; }
+  log('> ' + cmd, 'tx');
+  const data = new TextEncoder().encode(cmd + '\n');
+  writeChain = writeChain.then(() => rxChar.writeValue(data)).catch(e => log('전송 실패: ' + e.message, 'err'));
+}
+
+// notify는 MTU 단위로 잘려서 오므로 줄 단위로 다시 합침
+function onChunk(text) {
+  lineBuf += text;
+  let i;
+  while ((i = lineBuf.indexOf('\n')) >= 0) {
+    const line = lineBuf.slice(0, i).trim();
+    lineBuf = lineBuf.slice(i + 1);
+    if (line) onLine(line);
+  }
+  if (lineBuf.length > 4096) lineBuf = '';
+}
+
+function onLine(line) {
+  if (line[0] !== '{') { log(line); return; }  // RAW 프레임 등
+  let msg;
+  try { msg = JSON.parse(line); } catch { log(line, 'err'); return; }
+  switch (msg.t) {
+    case 'd': lastData = Date.now(); render(msg); break;
+    case 's': log(`상태: 모드=${msg.mode} 버스=${msg.bus} 수신=${msg.rx} 송신=${msg.tx} ` +
+                  `오류(rx/tx)=${msg.rxErr}/${msg.txErr} 누락=${msg.rxMissed}${msg.sim ? ' [시뮬레이션]' : ''}`); break;
+    case 'ok': log('OK ' + msg.msg); break;
+    case 'err': log('오류 ' + msg.msg, 'err'); break;
+    default: log(line);
+  }
+}
+
+// ----- 화면 갱신 -----
+function render(d) {
+  for (const m of METRICS) {
+    let v = d[m.k];
+    if (v == null && m.alt) v = d[m.alt];
+    const el = $('c-' + m.k);
+    const has = v != null;
+    el.classList.toggle('na', !has);
+    el.classList.toggle('warn', has && !!m.warn && m.warn(v, d));
+    el.querySelector('.val span').textContent = has ? v.toFixed(m.dec) : '--';
+    const bar = el.querySelector('.bar i');
+    if (bar) bar.style.width = has ? Math.max(0, Math.min(100, v / m.max * 100)) + '%' : '0';
+  }
+  $('lamp-mil').classList.toggle('on', !!d.mil);
+  $('lamp-rsl').classList.toggle('on', !!d.rsl);
+  $('lamp-awl').classList.toggle('on', !!d.awl);
+
+  const box = $('dtcs');
+  if (!d.dtc || !d.dtc.length) {
+    box.innerHTML = '<div class="empty">고장 코드 없음</div>';
+    return;
+  }
+  box.innerHTML = '';
+  for (const [spn, fmi, oc, sa] of d.dtc) {
+    const el = document.createElement('div');
+    el.className = 'dtc';
+    el.innerHTML = `<b>SPN ${spn} / FMI ${fmi}</b> ${SPN_NAMES[spn] || ''}` +
+      `<small>${FMI_NAMES[fmi] || '알 수 없는 FMI'} · 발생 ${oc}회 · ECU 0x${sa.toString(16).toUpperCase().padStart(2, '0')}</small>`;
+    box.appendChild(el);
+  }
+}
+
+// 데이터가 2초 이상 안 오면 표시
+setInterval(() => {
+  if (!rxChar) return;
+  const stale = Date.now() - lastData > 2000;
+  $('dot').className = 'dot ' + (stale ? 'stale' : 'on');
+}, 1000);
+
+// ----- 이벤트 -----
+$('btnConnect').onclick = () => (device && device.gatt.connected ? disconnect() : connect());
+$('btnClear').onclick = () => { logEl.innerHTML = ''; };
+document.querySelectorAll('[data-cmd]').forEach(b => {
+  b.onclick = () => {
+    if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;
+    send(b.dataset.cmd);
+  };
+});
+$('cmdForm').onsubmit = e => {
+  e.preventDefault();
+  const v = $('cmdInput').value.trim();
+  if (!v) return;
+  if (/^MODE\s+NORMAL/i.test(v) && !confirm('송신 모드로 전환할까요? 정차 상태에서만 사용하세요.')) return;
+  send(v);
+  $('cmdInput').value = '';
+};
+</script>
+</body>
+</html>
