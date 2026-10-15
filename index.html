@@ -62,12 +62,29 @@
   form input { flex: 1; min-width: 0; font: 14px ui-monospace, Consolas, monospace; padding: 8px 10px;
     border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
   .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  h2 small { font-weight: 400; color: var(--muted); }
+  #chart { display: block; width: 100%; height: 300px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin: 6px 2px 10px; }
+  .legend i { display: inline-block; width: 14px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 4px; }
+  .legend i.dash { border-top-style: dashed; }
+  .frow { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; margin-bottom: 6px; }
+  .frow .hd { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .frow .hd b { font-size: 14px; }
+  .frow .hd span { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .frow .hd span.bad { color: var(--warn); font-weight: 600; }
+  .frow .vals { font-size: 13px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .wifi { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .wifi a { color: var(--accent); font-weight: 600; word-break: break-all; }
+  .wifi form { flex-wrap: wrap; }
+  .wifi form input { flex: 1 1 140px; }
 </style>
 </head>
 <body>
 <header>
   <span class="dot" id="dot"></span>
   <h1>트랙터 모니터</h1>
+  <span class="badge" id="via"></span>
   <button class="primary" id="btnConnect">연결</button>
 </header>
 
@@ -82,6 +99,34 @@
 
   <h2>고장 코드 (DM1)</h2>
   <div id="dtcs"><div class="empty">고장 코드 없음</div></div>
+
+  <h2>고속 신호 <small>EEC1 · TSC1 (10ms)</small></h2>
+  <div id="fastNote" class="empty">10ms 데이터는 Wi-Fi로 접속했을 때 표시됩니다. 아래 Wi-Fi 설정에서 핫스팟을 등록한 뒤 "Wi-Fi 대시보드 열기"를 누르세요.</div>
+  <div id="fast" hidden>
+    <canvas id="chart"></canvas>
+    <div class="legend" id="legend"></div>
+    <div class="quick">
+      <button id="btnPause">일시정지</button>
+      <button id="btnRec">기록 시작</button>
+      <button data-cmd="STREAM F004 0000">EEC1+TSC1만</button>
+      <button data-cmd="STREAM ALL">전체 프레임</button>
+      <span class="meta" id="recInfo"></span>
+    </div>
+    <div id="frows"><div class="empty">수신 대기 중…</div></div>
+  </div>
+
+  <h2>Wi-Fi <small>스마트폰 핫스팟</small></h2>
+  <div class="wifi">
+    <div id="wifiState" class="meta" style="margin-top:0">상태 모름 (연결 후 표시)</div>
+    <div><a id="wifiLink" hidden></a></div>
+    <form id="wifiForm">
+      <input id="wifiSsid" placeholder="핫스팟 이름" autocomplete="off" autocapitalize="off">
+      <input id="wifiPass" type="password" placeholder="비밀번호 (8자 이상)" autocomplete="off">
+      <button type="submit">저장</button>
+      <button type="button" id="wifiOff">끄기</button>
+    </form>
+    <div class="meta">핫스팟은 2.4GHz로 설정하세요 (iPhone: "호환성 최대화" 켜기).</div>
+  </div>
 
   <h2>콘솔</h2>
   <div class="quick">
@@ -139,7 +184,10 @@ const FMI_NAMES = {
 
 const $ = id => document.getElementById(id);
 const grid = $('grid'), logEl = $('log');
+// GitHub Pages(HTTPS)에서는 BLE, ESP32가 직접 제공하는 페이지(HTTP)에서는 Wi-Fi(WebSocket)
+const OVER_WIFI = location.protocol === 'http:';
 let device = null, rxChar = null, lineBuf = '', lastData = 0, writeChain = Promise.resolve();
+let ws = null, wsWanted = false;
 
 // ----- 카드 생성 -----
 for (const m of METRICS) {
@@ -191,6 +239,7 @@ async function connect() {
 }
 
 function disconnect() {
+  if (OVER_WIFI) { wsWanted = false; if (ws) ws.close(); else setConnected(false); return; }
   if (device && device.gatt.connected) device.gatt.disconnect();
 }
 
@@ -200,17 +249,45 @@ function onDisconnected() {
   log('연결 끊김', 'err');
 }
 
+// ----- Wi-Fi (WebSocket) -----
+function wsConnect() {
+  wsWanted = true;
+  const sock = new WebSocket(`ws://${location.host}/ws`);
+  sock.binaryType = 'arraybuffer';
+  let opened = false;
+  sock.onopen = () => {
+    opened = true;
+    ws = sock;
+    resetFast();
+    setConnected(true);
+    log('Wi-Fi 연결됨');
+    send('STATUS');
+  };
+  sock.onmessage = e => (typeof e.data === 'string' ? onChunk(e.data + '\n') : onBinary(e.data));
+  sock.onclose = () => {
+    if (ws === sock) ws = null;
+    setConnected(false);
+    if (opened) log('연결 끊김', 'err');
+    if (wsWanted) setTimeout(() => { if (wsWanted && !ws) wsConnect(); }, 2000);
+  };
+}
+
+function isConnected() {
+  return OVER_WIFI ? !!ws : !!rxChar;
+}
+
 function setConnected(on) {
-  $('btnConnect').textContent = on ? '연결 해제' : '연결';
+  $('btnConnect').textContent = on ? '연결 해제' : OVER_WIFI && wsWanted ? '재접속 중… (중지)' : '연결';
   $('btnConnect').classList.toggle('primary', !on);
   $('dot').className = 'dot' + (on ? ' on' : '');
-  $('meta').textContent = on ? (device.name + ' 연결됨') : '연결되지 않음';
+  $('meta').textContent = on ? (OVER_WIFI ? location.host : device.name) + ' 연결됨' : '연결되지 않음';
 }
 
 // GATT 쓰기는 동시에 하나만 가능 → 순서대로 직렬화
-function send(cmd) {
-  if (!rxChar) { log('연결되지 않음', 'err'); return; }
-  log('> ' + cmd, 'tx');
+function send(cmd, shown = cmd) {
+  if (!isConnected()) { log('연결되지 않음', 'err'); return; }
+  log('> ' + shown, 'tx');
+  if (OVER_WIFI) { ws.send(cmd); return; }
   const data = new TextEncoder().encode(cmd + '\n');
   writeChain = writeChain.then(() => rxChar.writeValue(data)).catch(e => log('전송 실패: ' + e.message, 'err'));
 }
@@ -234,7 +311,9 @@ function onLine(line) {
   switch (msg.t) {
     case 'd': lastData = Date.now(); render(msg); break;
     case 's': log(`상태: 모드=${msg.mode} 버스=${msg.bus} 수신=${msg.rx} 송신=${msg.tx} ` +
-                  `오류(rx/tx)=${msg.rxErr}/${msg.txErr} 누락=${msg.rxMissed}${msg.sim ? ' [시뮬레이션]' : ''}`); break;
+                  `오류(rx/tx)=${msg.rxErr}/${msg.txErr} 누락(CAN/큐/스트림)=${msg.rxMissed}/${msg.rxDrop}/${msg.stDrop}` +
+                  `${msg.sim ? ' [시뮬레이션]' : ''}`); break;
+    case 'w': showWifi(msg); break;
     case 'ok': log('OK ' + msg.msg); break;
     case 'err': log('오류 ' + msg.msg, 'err'); break;
     default: log(line);
@@ -273,15 +352,285 @@ function render(d) {
   }
 }
 
+// ----- Wi-Fi 상태 / 설정 -----
+function showWifi(w) {
+  const st = { off: '꺼짐', connecting: '핫스팟 찾는 중…', connected: '연결됨' }[w.st] || w.st;
+  $('wifiState').textContent = 'Wi-Fi: ' + st + (w.ssid ? ' · ' + w.ssid : '') +
+    (w.ip ? ` · ${w.ip}` + (w.rssi != null ? ` (신호 ${w.rssi} dBm)` : '') : '');
+  const a = $('wifiLink');
+  a.hidden = !w.ip || OVER_WIFI;
+  if (w.ip) { a.href = `http://${w.ip}/`; a.textContent = `Wi-Fi 대시보드 열기 → http://${w.ip}/`; }
+  if (w.ssid && !$('wifiSsid').value) $('wifiSsid').value = w.ssid;
+  log(`Wi-Fi ${st}${w.ip ? ' ' + w.ip : ''}`);
+}
+
+$('wifiForm').onsubmit = e => {
+  e.preventDefault();
+  const ssid = $('wifiSsid').value.trim(), pass = $('wifiPass').value;
+  if (!ssid) { alert('핫스팟 이름을 입력하세요.'); return; }
+  if (pass.length < 8 || /\s/.test(pass)) { alert('비밀번호는 공백 없이 8자 이상이어야 합니다.'); return; }
+  if (OVER_WIFI && !confirm('Wi-Fi 설정을 바꾸면 지금 연결이 끊어집니다. 계속할까요?')) return;
+  send(`WIFI ${ssid} ${pass}`, `WIFI ${ssid} ********`);
+  $('wifiPass').value = '';
+};
+$('wifiOff').onclick = () => {
+  if (!confirm('Wi-Fi를 끌까요?' + (OVER_WIFI ? ' 지금 연결이 끊어집니다.' : ''))) return;
+  send('WIFI OFF');
+};
+
+// ----- 고속 스트림 (Wi-Fi 전용) -----
+// ESP32가 보내는 레코드 16바이트: [수신 시각 µs u32][CAN ID u32][데이터 8]
+const REC = 16, CHART_SEC = 10, REC_MAX = 2000000;
+const PGN_NAMES = { 0xF004: 'EEC1', 0x0000: 'TSC1', 0xF003: 'EEC2', 0xF002: 'ETC1', 0xF005: 'ETC2' };
+const OVR = ['제어 없음', '속도 제어', '토크 제어', '속도/토크 제한'];
+const PALETTE = ['#2f7d4f', '#2563eb', '#d97706', '#9333ea', '#db2777', '#0891b2'];
+const hex = (v, n = 2) => v.toString(16).toUpperCase().padStart(n, '0');
+const fmt = (v, d = 0) => (v == null ? '--' : v.toFixed(d));
+
+let streams = new Map(), series = new Map(), lastUs = 0, tNow = null, paused = false, rec = null, colorIdx = 0;
+
+function resetFast() {
+  streams = new Map(); series = new Map(); tNow = null; colorIdx = 0;
+  $('frows').innerHTML = '<div class="empty">수신 대기 중…</div>';
+  $('legend').innerHTML = '';
+}
+
+function pgnOf(id) {
+  let p = (id >>> 8) & 0x3FFFF;
+  if (((p >> 8) & 0xFF) < 240) p &= 0x3FF00;  // PDU1: PS는 목적지 주소
+  return p;
+}
+const u8 = (b, i) => (b[i] > 0xFA ? null : b[i] - 125);  // % (오프셋 -125)
+const u16 = (b, i) => { const v = b[i] | (b[i + 1] << 8); return v > 0xFAFF ? null : v * 0.125; };  // rpm
+
+function decode(pgn, b) {
+  if (pgn === 0xF004) return { tmode: b[0] & 0x0F, drv: u8(b, 1), act: u8(b, 2), rpm: u16(b, 3), ctl: b[5], dem: u8(b, 7) };
+  if (pgn === 0x0000) return { ovr: b[0] & 3, cond: (b[0] >> 2) & 3, prio: (b[0] >> 4) & 3, spd: u16(b, 1), trq: u8(b, 3), cnt: b[7] >> 4 };
+  return null;
+}
+
+function onBinary(buf) {
+  const dv = new DataView(buf), n = Math.floor(buf.byteLength / REC);
+  for (let i = 0; i < n; i++) {
+    const o = i * REC, us = dv.getUint32(o, true);
+    // µs 카운터는 약 71분마다 0으로 돌아가므로 차이만 누적
+    if (tNow === null) { tNow = 0; lastUs = us; }
+    tNow += ((us - lastUs) | 0) / 1e6;
+    lastUs = us;
+    onFrame(tNow, dv.getUint32(o + 4, true), new Uint8Array(buf, o + 8, 8));
+  }
+}
+
+function addPoint(key, label, color, dash, panel, t, v) {
+  if (v == null) return;
+  let s = series.get(key);
+  if (!s) {
+    s = { label, color, dash, panel, pts: [] };
+    series.set(key, s);
+    renderLegend();
+  }
+  s.pts.push(t, v);
+  if (s.pts.length > 8000) {  // 오래된 점 정리
+    let k = 0;
+    while (k < s.pts.length && s.pts[k] < t - CHART_SEC - 1) k += 2;
+    s.pts.splice(0, k);
+  }
+}
+
+function onFrame(t, id, b) {
+  const pgn = pgnOf(id), sa = id & 0xFF, da = (id >>> 8) & 0xFF, pdu1 = ((pgn >> 8) & 0xFF) < 240;
+  const key = pgn + ':' + sa + (pdu1 ? ':' + da : '');
+  let s = streams.get(key);
+  if (!s) {
+    s = { pgn, sa, da: pdu1 ? da : null, n: 0, lastT: null, avg: 0, late: 0, maxGap: 0, winN: 0, winMax: 0, winT: t,
+          hz: 0, color: PALETTE[colorIdx++ % PALETTE.length] };
+    s.name = (PGN_NAMES[pgn] || 'PGN ' + hex(pgn, 4)) + ` · SA ${hex(sa)}` + (pdu1 ? ` → ${hex(da)}` : '');
+    streams.set(key, s);
+  }
+  if (s.lastT !== null) {
+    const g = t - s.lastT;
+    if (s.n > 50 && g > 2 * s.avg) s.late++;  // 평소 주기의 2배 넘게 비면 누락 의심
+    s.avg = s.avg ? s.avg * 0.98 + g * 0.02 : g;
+    if (g > s.winMax) s.winMax = g;
+  }
+  s.lastT = t; s.n++; s.winN++;
+  s.raw = b.slice();
+  s.d = decode(pgn, b);
+
+  const d = s.d;
+  if (pgn === 0xF004) {
+    addPoint(key + 'rpm', `${s.name} 회전수`, s.color, false, 0, t, d.rpm);
+    addPoint(key + 'act', `${s.name} 실제 토크`, s.color, false, 1, t, d.act);
+    addPoint(key + 'drv', `${s.name} 운전자 요구`, s.color, true, 1, t, d.drv);
+  } else if (pgn === 0x0000) {
+    addPoint(key + 'spd', `${s.name} 요청 속도`, s.color, false, 0, t, d.spd);
+    addPoint(key + 'trq', `${s.name} 요청 토크`, s.color, false, 1, t, d.trq);
+  }
+
+  if (rec) {
+    const v = d || {};
+    rec.rows.push([t.toFixed(6), hex(id, 8), hex(pgn, 4), hex(sa), pdu1 ? hex(da) : '', Array.from(b, x => hex(x)).join(''),
+      v.rpm ?? '', v.act ?? '', v.drv ?? '', v.spd ?? '', v.trq ?? '', v.ovr ?? ''].join(','));
+    if (rec.rows.length >= REC_MAX) stopRec();
+  }
+}
+
+function renderLegend() {
+  $('legend').innerHTML = '';
+  for (const s of series.values()) {
+    const el = document.createElement('span');
+    el.innerHTML = `<i class="${s.dash ? 'dash' : ''}" style="border-color:${s.color}"></i>`;
+    el.append(s.label);
+    $('legend').appendChild(el);
+  }
+}
+
+// 메시지별 주기 / 최대 간격 / 값 (1초마다)
+function renderRows() {
+  if (!streams.size) return;
+  const box = $('frows');
+  box.innerHTML = '';
+  for (const s of streams.values()) {
+    const span = tNow - s.winT;
+    if (span >= 1) { s.hz = s.winN / span; s.maxGap = s.winMax; s.winN = 0; s.winMax = 0; s.winT = tNow; }
+    const stale = tNow - s.lastT > 1;
+    const d = s.d;
+    let vals;
+    if (s.pgn === 0xF004) {
+      vals = `회전수 ${fmt(d.rpm)} rpm · 실제 토크 ${fmt(d.act)}% · 운전자 요구 ${fmt(d.drv)}% · 엔진 요구 ${fmt(d.dem)}%` +
+        ` · 토크모드 ${d.tmode} · 제어 SA ${hex(d.ctl)}`;
+    } else if (s.pgn === 0x0000) {
+      vals = `${OVR[d.ovr]} · 요청 속도 ${fmt(d.spd)} rpm · 요청 토크 ${fmt(d.trq)}% · 우선순위 ${d.prio} · 카운터 ${d.cnt}`;
+    } else {
+      vals = Array.from(s.raw, x => hex(x)).join(' ');
+    }
+    const el = document.createElement('div');
+    el.className = 'frow';
+    el.innerHTML = `<div class="hd"><b style="color:${s.color}"></b>` +
+      `<span>${stale ? '수신 없음' : fmt(s.hz, 1) + ' Hz'}</span>` +
+      `<span>평균 ${fmt(s.avg * 1000, 1)} ms</span>` +
+      `<span class="${s.maxGap > 2 * s.avg ? 'bad' : ''}">최대 간격 ${fmt(s.maxGap * 1000, 1)} ms</span>` +
+      `<span class="${s.late ? 'bad' : ''}">누락 의심 ${s.late}</span></div><div class="vals"></div>`;
+    el.querySelector('b').textContent = s.name;
+    el.querySelector('.vals').textContent = vals;
+    box.appendChild(el);
+  }
+}
+
+function drawChart() {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (tNow === null) return;
+
+  const css = getComputedStyle(document.documentElement);
+  const muted = css.getPropertyValue('--muted').trim(), line = css.getPropertyValue('--line').trim();
+  const L = 44, R = 8, tEnd = tNow, tStart = tEnd - CHART_SEC;
+  const panels = [
+    { title: '회전수 (rpm)', y0: 8, y1: h / 2 - 10, lo: 0, hi: 1000 },
+    { title: '토크 (%)', y0: h / 2 + 10, y1: h - 18, lo: 0, hi: 100 },
+  ];
+  for (const s of series.values()) {
+    const p = panels[s.panel];
+    for (let i = 0; i < s.pts.length; i += 2) {
+      if (s.pts[i] < tStart) continue;
+      p.lo = Math.min(p.lo, s.pts[i + 1]); p.hi = Math.max(p.hi, s.pts[i + 1]);
+    }
+  }
+  const x = t => L + (t - tStart) / CHART_SEC * (w - L - R);
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.lineWidth = 1;
+  for (const p of panels) {
+    const step = niceStep((p.hi - p.lo) / 3);
+    p.lo = Math.floor(p.lo / step) * step; p.hi = Math.ceil(p.hi / step) * step;
+    p.y = v => p.y1 - (v - p.lo) / (p.hi - p.lo) * (p.y1 - p.y0);
+    ctx.strokeStyle = line; ctx.fillStyle = muted; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (let v = p.lo; v <= p.hi + 1e-9; v += step) {
+      ctx.beginPath(); ctx.moveTo(L, p.y(v)); ctx.lineTo(w - R, p.y(v)); ctx.stroke();
+      ctx.fillText(v, L - 4, p.y(v));
+    }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(p.title, L + 4, p.y0);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = muted;
+  for (let s = 0; s <= CHART_SEC; s += 2) ctx.fillText(s === CHART_SEC ? '지금' : `-${CHART_SEC - s}s`, x(tStart + s), h - 2);
+
+  ctx.lineWidth = 1.6;
+  for (const s of series.values()) {
+    const p = panels[s.panel];
+    ctx.strokeStyle = s.color;
+    ctx.setLineDash(s.dash ? [5, 4] : []);
+    ctx.beginPath();
+    let started = false, prevT = 0;
+    for (let i = 0; i < s.pts.length; i += 2) {
+      const t = s.pts[i];
+      if (t < tStart) continue;
+      const X = x(t), Y = p.y(s.pts[i + 1]);
+      if (!started || t - prevT > 0.5) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);  // 0.5초 넘게 끊기면 선을 잇지 않음
+      started = true; prevT = t;
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+}
+
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+
+// ----- CSV 기록 -----
+function startRec() {
+  rec = { rows: [], started: new Date() };
+  $('btnRec').textContent = '기록 중지 · 저장';
+}
+function stopRec() {
+  if (!rec) return;
+  const head = 'time_s,can_id,pgn,sa,da,data,rpm,act_torque_pct,drv_demand_pct,req_speed_rpm,req_torque_pct,override_mode';
+  const blob = new Blob([head + '\n' + rec.rows.join('\n') + '\n'], { type: 'text/csv' });
+  const p = n => String(n).padStart(2, '0'), d = rec.started;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tractor_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  log(`CSV 저장: ${rec.rows.length}행`);
+  rec = null;
+  $('btnRec').textContent = '기록 시작';
+  $('recInfo').textContent = '';
+}
+
+$('btnRec').onclick = () => (rec ? stopRec() : startRec());
+$('btnPause').onclick = () => { paused = !paused; $('btnPause').textContent = paused ? '계속' : '일시정지'; };
+
+if (OVER_WIFI) {
+  $('fast').hidden = false;
+  $('fastNote').hidden = true;
+  setInterval(() => { if (!paused) drawChart(); }, 100);
+  setInterval(() => {
+    if (!paused) renderRows();
+    if (rec) $('recInfo').textContent = `기록 중 ${rec.rows.length}행`;
+  }, 1000);
+}
+
 // 데이터가 2초 이상 안 오면 표시
 setInterval(() => {
-  if (!rxChar) return;
+  if (!isConnected()) return;
   const stale = Date.now() - lastData > 2000;
   $('dot').className = 'dot ' + (stale ? 'stale' : 'on');
 }, 1000);
 
 // ----- 이벤트 -----
-$('btnConnect').onclick = () => (device && device.gatt.connected ? disconnect() : connect());
+$('via').textContent = OVER_WIFI ? 'Wi-Fi' : 'BLE';
+// Wi-Fi는 끊기면 자동 재접속하므로, 재접속 대기 중에 누르면 재접속을 멈춤
+$('btnConnect').onclick = () => (OVER_WIFI ? (wsWanted ? disconnect() : wsConnect()) : isConnected() ? disconnect() : connect());
+if (OVER_WIFI) wsConnect();
 $('btnClear').onclick = () => { logEl.innerHTML = ''; };
 document.querySelectorAll('[data-cmd]').forEach(b => {
   b.onclick = () => {
